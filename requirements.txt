@@ -1,0 +1,3 @@
+pandas>=2.2,<4
+pyarrow>=17,<24
+networkx>=3.3,<4

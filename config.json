@@ -1,0 +1,1 @@
+{"seed":42,"many_peers":4,"transit_ratio":0.7,"terminal_ratio":0.15,"coordinator_betweenness":0.12,"priority_weights":{"flow":0.35,"degree":0.25,"betweenness":0.3,"seed":0.1}}
