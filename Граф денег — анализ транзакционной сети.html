@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Граф денег — анализ транзакционной сети</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171d2b; --panel2: #1e2536; --border: #2a3344;
+    --text: #e7ebf3; --muted: #94a3b8; --accent: #6fb3c8;
+    padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  .hidden { display: none !important; }
+  select, input[type=text], input[type=number] { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 4px 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); }
+  .tab-btn { padding: 6px 14px; border-radius: 6px; color: var(--muted); font-size: 14px; }
+  .tab-btn.bg-slate-700 { color: var(--text); }
+  .btn { background: var(--accent); color: #0b1420; font-weight: 600; border-radius: 6px; padding: 6px 14px; font-size: 14px; }
+  .btn:hover { filter: brightness(1.1); }
+  .btn-secondary { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 12px; font-size: 13px; }
+  #log { white-space: pre-wrap; font-family: monospace; font-size: 11px; color: var(--muted); max-height: 80px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<div class="max-w-[1400px] mx-auto p-4">
+  <header class="mb-4">
+    <h1 class="text-xl font-semibold">Граф денег: анализ транзакционной сети</h1>
+    <p class="text-sm text-slate-400 mt-1">Локальный клиентский анализ — все данные и вычисления остаются в вашем браузере, ничего не отправляется на сервер. Роли и гипотезы — результат детерминированных правил, не утверждение о виновности; требуется ручная проверка аналитиком.</p>
+  </header>
+
+  <section class="panel p-4 mb-4">
+    <div class="flex flex-wrap items-end gap-4">
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">nodes.parquet / .csv</label>
+        <input type="file" id="file-nodes" accept=".parquet,.csv" class="text-sm">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">edges.parquet / .csv</label>
+        <input type="file" id="file-edges" accept=".parquet,.csv" class="text-sm">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-400 mb-1">transactions.parquet / .csv (необязательно)</label>
+        <input type="file" id="file-tx" accept=".parquet,.csv" class="text-sm">
+      </div>
+      <div class="flex items-end gap-2">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">или синтетические данные, узлов</label>
+          <input type="number" id="synthetic-n" value="250" class="w-24">
+        </div>
+        <button id="btn-load-synthetic" class="btn-secondary">Сгенерировать синтетику</button>
+      </div>
+      <button id="btn-run" class="btn ml-auto">Запустить анализ</button>
+    </div>
+    <div id="status" class="text-sm text-slate-300 mt-3"></div>
+    <div id="log"></div>
+  </section>
+
+  <section id="results" class="hidden">
+    <div class="grid grid-cols-4 gap-3 mb-4">
+      <div class="panel p-3"><div class="text-xs text-slate-400">Узлов</div><div id="stat-nodes" class="text-lg font-semibold"></div></div>
+      <div class="panel p-3"><div class="text-xs text-slate-400">Рёбер</div><div id="stat-edges" class="text-lg font-semibold"></div></div>
+      <div class="panel p-3"><div class="text-xs text-slate-400">Транзакций</div><div id="stat-tx" class="text-lg font-semibold"></div></div>
+      <div class="panel p-3"><div class="text-xs text-slate-400">Кластеров</div><div id="stat-clusters" class="text-lg font-semibold"></div></div>
+    </div>
+
+    <div class="grid grid-cols-3 gap-4 mb-4">
+      <div class="panel p-3 col-span-2">
+        <div class="text-sm font-semibold mb-2">Распределение ролей</div>
+        <div id="role-bars"></div>
+      </div>
+      <div class="panel p-3">
+        <div class="text-sm font-semibold mb-2">Автоматические проверки</div>
+        <div id="checks" class="text-sm"></div>
+      </div>
+    </div>
+
+    <div class="flex gap-2 mb-3">
+      <button class="tab-btn bg-slate-700" data-tab="graph">Граф</button>
+      <button class="tab-btn" data-tab="top">Топ узлов</button>
+      <button class="tab-btn" data-tab="clusters">Кластеры</button>
+      <button class="tab-btn" data-tab="table">Таблица</button>
+      <div class="ml-auto flex gap-2">
+        <button id="btn-export-nodes" class="btn-secondary">↓ nodes_roles.csv</button>
+        <button id="btn-export-clusters" class="btn-secondary">↓ clusters.csv</button>
+        <button id="btn-export-top" class="btn-secondary">↓ top_nodes.csv</button>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap gap-3 mb-3 items-center panel p-3">
+      <select id="filter-role"></select>
+      <select id="filter-cluster"></select>
+      <input type="text" id="search-gid" placeholder="Поиск по gid…" class="flex-1 min-w-[160px]">
+    </div>
+
+    <div id="tab-graph" class="tab-panel">
+      <div class="panel p-2">
+        <canvas id="graph-canvas" style="width:100%;height:520px;display:block;"></canvas>
+      </div>
+      <div id="graph-caption" class="text-xs text-slate-400 mt-1"></div>
+      <div class="flex gap-4 mt-2 text-xs flex-wrap" id="legend"></div>
+      <div id="node-card" class="panel p-3 mt-3 hidden"></div>
+    </div>
+
+    <div id="tab-top" class="tab-panel hidden panel p-2" style="max-height:600px;overflow:auto;">
+      <table>
+        <thead><tr><th>#</th><th>gid</th><th>роль</th><th>priority</th><th>объяснение</th></tr></thead>
+        <tbody id="top-body"></tbody>
+      </table>
+    </div>
+
+    <div id="tab-clusters" class="tab-panel hidden panel p-2" style="max-height:600px;overflow:auto;">
+      <table>
+        <thead><tr><th>cluster_id</th><th>узлов</th><th>seed</th><th>sum_kzt_internal</th><th>top_gids</th><th>гипотеза</th></tr></thead>
+        <tbody id="clusters-body"></tbody>
+      </table>
+    </div>
+
+    <div id="tab-table" class="tab-panel hidden panel p-2">
+      <div id="table-count" class="text-xs text-slate-400 p-2"></div>
+      <div style="max-height:560px;overflow:auto;">
+        <table>
+          <thead><tr><th>gid</th><th>роль</th><th>role_score</th><th>cluster</th><th>priority</th><th>evidence</th></tr></thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('legend').innerHTML = Object.entries({consolidator:'#e2725b',distributor:'#4c8dae',transit:'#d9a441',terminal:'#5c9e6f',coordinator:'#9b7fc7',peripheral:'#6b7280'})
+    .map(([r,c]) => `<span><span style="color:${c}">●</span> ${r}</span>`).join('');
+});
+</script>
+
+<script>
+// Core graph analysis logic — pure functions, no DOM.
+// Mirrors src/*.py from the Python MVP (roles, clustering, scoring, checks).
+
+const THRESHOLDS = {
+  minTotalDegree: 2,
+  consolidatorMinInDegree: 5,
+  consolidatorRatio: 2.0,
+  distributorMinOutDegree: 5,
+  distributorRatio: 2.0,
+  transitMinInDegree: 2,
+  transitMinOutDegree: 2,
+  transitBalanceTolerance: 0.35,
+  terminalMinInDegree: 1,
+  terminalMinInDegreeAtMaxDepth: 2,
+  coordinatorBetweennessPercentile: 0.90,
+  coordinatorMinTotalDegree: 4,
+  wRoleScore: 0.35, wVolume: 0.25, wCentrality: 0.20, wIsSeed: 0.10, wClusterDensity: 0.10,
+  topNodesMinRows: 20,
+  evidenceMaxLen: 200,
+};
+
+const ROLE_PRIORITY = ['coordinator', 'consolidator', 'distributor', 'transit', 'terminal', 'peripheral'];
+
+function buildGraph(nodes, edges) {
+  // out[gid] = Map(dst -> {sum, n}); in[gid] = Map(src -> {sum, n})
+  const out = new Map(), inn = new Map();
+  const allGids = new Set(nodes.map(n => String(n.gid)));
+  for (const g of allGids) { out.set(g, new Map()); inn.set(g, new Map()); }
+  const agg = new Map(); // "src|dst" -> {sum, n}
+  for (const e of edges) {
+    const src = String(e.src), dst = String(e.dst);
+    const key = src + '|' + dst;
+    if (!agg.has(key)) agg.set(key, { src, dst, sum: 0, n: 0 });
+    const a = agg.get(key);
+    a.sum += Number(e.sum_kzt) || 0;
+    a.n += Number(e.n_tx) || 0;
+  }
+  for (const { src, dst, sum, n } of agg.values()) {
+    if (!out.has(src)) { out.set(src, new Map()); inn.set(src, new Map()); allGids.add(src); }
+    if (!out.has(dst)) { out.set(dst, new Map()); inn.set(dst, new Map()); allGids.add(dst); }
+    out.get(src).set(dst, { sum, n });
+    inn.get(dst).set(src, { sum, n });
+  }
+  return { out, inn, allGids };
+}
+
+function undirectedNeighbors(out, inn) {
+  // adjacency list for undirected unweighted graph, used for betweenness
+  const adj = new Map();
+  const ensure = g => { if (!adj.has(g)) adj.set(g, new Set()); return adj.get(g); };
+  for (const [u, m] of out) for (const v of m.keys()) { ensure(u).add(v); ensure(v).add(u); }
+  for (const [u, m] of inn) for (const v of m.keys()) { ensure(u).add(v); ensure(v).add(u); }
+  return adj;
+}
+
+// Brandes' algorithm, unweighted, normalized betweenness centrality.
+function betweennessCentrality(adj) {
+  const nodesArr = [...adj.keys()];
+  const betw = new Map(nodesArr.map(n => [n, 0]));
+  const n = nodesArr.length;
+  for (const s of nodesArr) {
+    const S = [];
+    const P = new Map(nodesArr.map(v => [v, []]));
+    const sigma = new Map(nodesArr.map(v => [v, 0])); sigma.set(s, 1);
+    const d = new Map(nodesArr.map(v => [v, -1])); d.set(s, 0);
+    const Q = [s];
+    let qi = 0;
+    while (qi < Q.length) {
+      const v = Q[qi++]; S.push(v);
+      for (const w of adj.get(v)) {
+        if (d.get(w) < 0) { Q.push(w); d.set(w, d.get(v) + 1); }
+        if (d.get(w) === d.get(v) + 1) { sigma.set(w, sigma.get(w) + sigma.get(v)); P.get(w).push(v); }
+      }
+    }
+    const delta = new Map(nodesArr.map(v => [v, 0]));
+    while (S.length) {
+      const w = S.pop();
+      for (const v of P.get(w)) {
+        delta.set(v, delta.get(v) + (sigma.get(v) / sigma.get(w)) * (1 + delta.get(w)));
+      }
+      if (w !== s) betw.set(w, betw.get(w) + delta.get(w));
+    }
+  }
+  // normalize like networkx: undirected -> divide by (n-1)(n-2), and by 2 since each pair counted twice
+  const scale = n > 2 ? 1 / ((n - 1) * (n - 2)) : 0;
+  for (const k of betw.keys()) betw.set(k, betw.get(k) * scale);
+  return betw;
+}
+
+function computeFeatures(nodes, out, inn, adj) {
+  const maxDepth = Math.max(...nodes.map(n => Number(n.depth) || 0));
+  const betw = betweennessCentrality(adj);
+  const feats = new Map();
+  for (const nd of nodes) {
+    const gid = String(nd.gid);
+    const outM = out.get(gid) || new Map();
+    const inM = inn.get(gid) || new Map();
+    let inSum = 0, outSum = 0;
+    for (const v of inM.values()) inSum += v.sum;
+    for (const v of outM.values()) outSum += v.sum;
+    const inDeg = inM.size, outDeg = outM.size;
+    feats.set(gid, {
+      gid, depth: Number(nd.depth) || 0, isSeed: !!nd.is_seed,
+      inDegree: inDeg, outDegree: outDeg, inSum, outSum,
+      betweenness: betw.get(gid) || 0,
+      totalDegree: inDeg + outDeg, totalSum: inSum + outSum,
+      isMaxDepth: (Number(nd.depth) || 0) === maxDepth,
+    });
+  }
+  return feats;
+}
+
+function fmtSum(x) {
+  if (x >= 1_000_000) return (x / 1_000_000).toFixed(1) + 'М';
+  if (x >= 1_000) return (x / 1_000).toFixed(0) + 'К';
+  return x.toFixed(0);
+}
+const clip01 = x => Math.max(0, Math.min(1, x));
+
+function tryCoordinator(f, th, betwThreshold) {
+  if (f.totalDegree < th.coordinatorMinTotalDegree) return null;
+  if (betwThreshold <= 0 || f.betweenness < betwThreshold) return null;
+  const score = clip01(0.6 + 0.4 * Math.min(1, (f.betweenness - betwThreshold) / (betwThreshold + 1e-9)));
+  return ['coordinator', score, `Высокая betweenness-центральность (${f.betweenness.toFixed(3)}, выше ${Math.round(th.coordinatorBetweennessPercentile * 100)}-го перцентиля), степень ${f.totalDegree} — кандидат на связующий узел`];
+}
+function tryConsolidator(f, th) {
+  if (f.inDegree < th.consolidatorMinInDegree) return null;
+  const ratioOk = f.outDegree === 0 || f.inDegree >= th.consolidatorRatio * f.outDegree;
+  if (!ratioOk) return null;
+  const excess = f.inDegree / Math.max(th.consolidatorMinInDegree, 1);
+  const score = clip01(0.5 + 0.5 * Math.min(1, excess - 1));
+  return ['consolidator', score, `Получал переводы от ${f.inDegree} разных отправителей (исходящих получателей: ${f.outDegree}), сумма входящих ~${fmtSum(f.inSum)} тг — признаки консолидации средств`];
+}
+function tryDistributor(f, th) {
+  if (f.outDegree < th.distributorMinOutDegree) return null;
+  const ratioOk = f.inDegree === 0 || f.outDegree >= th.distributorRatio * f.inDegree;
+  if (!ratioOk) return null;
+  const excess = f.outDegree / Math.max(th.distributorMinOutDegree, 1);
+  const score = clip01(0.5 + 0.5 * Math.min(1, excess - 1));
+  return ['distributor', score, `Переводил ${f.outDegree} разным получателям (входящих отправителей: ${f.inDegree}), сумма исходящих ~${fmtSum(f.outSum)} тг — признаки распределения средств`];
+}
+function tryTransit(f, th) {
+  if (f.inDegree < th.transitMinInDegree || f.outDegree < th.transitMinOutDegree) return null;
+  const denom = Math.max(f.inSum, f.outSum, 1);
+  const imbalance = Math.abs(f.inSum - f.outSum) / denom;
+  if (imbalance > th.transitBalanceTolerance) return null;
+  const score = clip01(1 - imbalance / Math.max(th.transitBalanceTolerance, 1e-9));
+  return ['transit', score, `Похоже на транзит: вход ${fmtSum(f.inSum)} тг от ${f.inDegree} отправителей, выход ${fmtSum(f.outSum)} тг к ${f.outDegree} получателям (баланс потоков близок)`];
+}
+function tryTerminal(f, th) {
+  if (f.outDegree !== 0) return null;
+  const minIn = f.isMaxDepth ? th.terminalMinInDegreeAtMaxDepth : th.terminalMinInDegree;
+  if (f.inDegree < minIn) return null;
+  let score = clip01(0.5 + 0.5 * Math.min(1, f.inDegree / Math.max(minIn * 2, 1)));
+  let caveat = '';
+  if (f.isMaxDepth) { caveat = ' (узел на максимальной глубине выборки — граф мог быть обрублен сбором данных, это не подтверждает окончательность)'; score = clip01(score * 0.85); }
+  return ['terminal', score, `Нет исходящих переводов, входящих отправителей: ${f.inDegree}, сумма входящих ~${fmtSum(f.inSum)} тг — признаки удержания средств${caveat}`];
+}
+function peripheral(f) {
+  return ['peripheral', 0.2, `Недостаточно данных для более определённой роли: in_degree=${f.inDegree}, out_degree=${f.outDegree}`];
+}
+
+function assignRoles(feats, th) {
+  const candidates = [...feats.values()].filter(f => f.totalDegree >= th.coordinatorMinTotalDegree).map(f => f.betweenness).sort((a, b) => a - b);
+  let betwThreshold = Infinity;
+  if (candidates.length && candidates[candidates.length - 1] > 0) {
+    const idx = Math.min(candidates.length - 1, Math.floor(th.coordinatorBetweennessPercentile * (candidates.length - 1)));
+    betwThreshold = candidates[idx];
+  }
+  const result = new Map();
+  for (const f of feats.values()) {
+    let r = null;
+    if (f.totalDegree >= th.minTotalDegree) {
+      for (const roleName of ROLE_PRIORITY.slice(0, -1)) {
+        if (roleName === 'coordinator') r = tryCoordinator(f, th, betwThreshold);
+        else if (roleName === 'consolidator') r = tryConsolidator(f, th);
+        else if (roleName === 'distributor') r = tryDistributor(f, th);
+        else if (roleName === 'transit') r = tryTransit(f, th);
+        else if (roleName === 'terminal') r = tryTerminal(f, th);
+        if (r) break;
+      }
+    }
+    if (!r) r = peripheral(f);
+    let [role, score, evidence] = r;
+    if (evidence.length > th.evidenceMaxLen) evidence = evidence.slice(0, th.evidenceMaxLen - 1) + '…';
+    result.set(f.gid, { ...f, role, roleScore: Math.round(score * 10000) / 10000, evidence });
+  }
+  return result;
+}
+
+// Simplified single-level greedy-modularity Louvain-style clustering on the
+// undirected weighted projection (weight(u,v) = sum_kzt(u->v)+sum_kzt(v->u)).
+// Simplification vs. full multi-level Louvain: one pass of local moves,
+// no hierarchical aggregation — documented limitation for the browser MVP.
+function computeClusters(out, inn, allGids) {
+  const wAdj = new Map(); // gid -> Map(neighbor -> weight)
+  const ensure = g => { if (!wAdj.has(g)) wAdj.set(g, new Map()); return wAdj.get(g); };
+  for (const g of allGids) ensure(g);
+  const addW = (a, b, w) => {
+    if (w <= 0) return;
+    const ma = ensure(a); ma.set(b, (ma.get(b) || 0) + w);
+    const mb = ensure(b); mb.set(a, (mb.get(a) || 0) + w);
+  };
+  for (const [u, m] of out) for (const [v, e] of m) addW(u, v, e.sum);
+
+  const degree = new Map();
+  let m2 = 0; // 2*m (sum of all weighted degrees)
+  for (const [g, m] of wAdj) {
+    let d = 0; for (const w of m.values()) d += w;
+    degree.set(g, d); m2 += d;
+  }
+
+  const isolated = [...allGids].filter(g => (wAdj.get(g)?.size || 0) === 0).sort();
+  const active = [...allGids].filter(g => (wAdj.get(g)?.size || 0) > 0);
+
+  let community = new Map(active.map(g => [g, g])); // start: singleton communities keyed by own gid
+  if (m2 > 0) {
+    const commWeight = new Map(active.map(g => [g, degree.get(g)]));
+    let improved = true, iterations = 0;
+    while (improved && iterations < 20) {
+      improved = false; iterations++;
+      for (const g of active) {
+        const currentComm = community.get(g);
+        const neighW = new Map();
+        for (const [v, w] of wAdj.get(g)) {
+          const c = community.get(v);
+          neighW.set(c, (neighW.get(c) || 0) + w);
+        }
+        // remove g from its community
+        commWeight.set(currentComm, commWeight.get(currentComm) - degree.get(g));
+        let bestComm = currentComm, bestGain = (neighW.get(currentComm) || 0) - (commWeight.get(currentComm) * degree.get(g)) / m2;
+        for (const [c, w] of neighW) {
+          const gain = w - (commWeight.get(c) || 0) * degree.get(g) / m2;
+          if (gain > bestGain + 1e-12) { bestGain = gain; bestComm = c; }
+        }
+        community.set(g, bestComm);
+        commWeight.set(bestComm, (commWeight.get(bestComm) || 0) + degree.get(g));
+        if (bestComm !== currentComm) improved = true;
+      }
+    }
+  }
+
+  // renumber communities deterministically by min gid in each community
+  const groups = new Map();
+  for (const g of active) {
+    const c = community.get(g);
+    if (!groups.has(c)) groups.set(c, []);
+    groups.get(c).push(g);
+  }
+  const orderedComms = [...groups.values()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  // sort members within, and sort groups by their min member
+  for (const arr of orderedComms) arr.sort();
+  orderedComms.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+
+  const clusterOf = new Map();
+  let nextId = 0;
+  for (const arr of orderedComms) { for (const g of arr) clusterOf.set(g, nextId); nextId++; }
+  for (const g of isolated) { clusterOf.set(g, nextId); nextId++; }
+  return clusterOf;
+}
+
+function minmax(values) {
+  let lo = Infinity, hi = -Infinity;
+  for (const v of values) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (hi - lo < 1e-12) return () => 0;
+  return v => (v - lo) / (hi - lo);
+}
+
+function computePriorityScores(rolesMap, clusterOf, th) {
+  const arr = [...rolesMap.values()];
+  const volNorm = minmax(arr.map(f => f.totalSum));
+  const centNorm = minmax(arr.map(f => f.betweenness));
+  const clusterSum = new Map();
+  for (const f of arr) {
+    const c = clusterOf.get(f.gid);
+    clusterSum.set(c, (clusterSum.get(c) || 0) + f.totalSum);
+  }
+  const densNorm = minmax([...clusterSum.values()]);
+  for (const f of arr) {
+    f.clusterId = clusterOf.get(f.gid);
+    const p = th.wRoleScore * f.roleScore + th.wVolume * volNorm(f.totalSum) + th.wCentrality * centNorm(f.betweenness)
+      + th.wIsSeed * (f.isSeed ? 1 : 0) + th.wClusterDensity * densNorm(clusterSum.get(f.clusterId));
+    f.priorityScore = Math.round(clip01(p) * 10000) / 10000;
+  }
+  return rolesMap;
+}
+
+function buildClustersTable(rolesMap, edges, topN = 5) {
+  const gidToCluster = new Map([...rolesMap.values()].map(f => [f.gid, f.clusterId]));
+  const internalSum = new Map();
+  for (const e of edges) {
+    const src = String(e.src), dst = String(e.dst);
+    const cs = gidToCluster.get(src), cd = gidToCluster.get(dst);
+    if (cs !== undefined && cs === cd) internalSum.set(cs, (internalSum.get(cs) || 0) + (Number(e.sum_kzt) || 0));
+  }
+  const byCluster = new Map();
+  for (const f of rolesMap.values()) {
+    if (!byCluster.has(f.clusterId)) byCluster.set(f.clusterId, []);
+    byCluster.get(f.clusterId).push(f);
+  }
+  const rows = [];
+  for (const [clusterId, group] of [...byCluster.entries()].sort((a, b) => a[0] - b[0])) {
+    const top = [...group].sort((a, b) => b.priorityScore - a.priorityScore).slice(0, topN);
+    const nSeed = group.filter(f => f.isSeed).length;
+    const roleCounts = {};
+    for (const f of group) roleCounts[f.role] = (roleCounts[f.role] || 0) + 1;
+    const dominant = Object.entries(roleCounts).sort((a, b) => b[1] - a[1]).filter(([r]) => r !== 'peripheral').slice(0, 2);
+    let hyp;
+    if (dominant.length) {
+      hyp = `Гипотеза по составу: в кластере ${dominant.map(([r, c]) => `${c} узел(ов) с ролью ${r}`).join(', ')}; seed-клиентов: ${nSeed} из ${group.length}. Требует ручной проверки.`;
+    } else {
+      hyp = `В кластере преимущественно peripheral-узлы (${group.length} шт., ${nSeed} seed) — выраженной структуры не обнаружено, кандидат низкого приоритета для проверки.`;
+    }
+    rows.push({
+      cluster_id: clusterId, n_nodes: group.length, n_seed: nSeed,
+      sum_kzt_internal: internalSum.get(clusterId) || 0,
+      top_gids: top.map(f => f.gid).join(';'), hypothesis: hyp,
+    });
+  }
+  return rows;
+}
+
+function buildTopNodesTable(rolesMap, minRows) {
+  const arr = [...rolesMap.values()].sort((a, b) => b.priorityScore - a.priorityScore);
+  const n = arr.length < minRows ? arr.length : minRows;
+  return arr.slice(0, n).map((f, i) => ({
+    rank: i + 1, gid: f.gid, role: f.role, priority_score: f.priorityScore,
+    why: `role=${f.role} (score=${f.roleScore.toFixed(2)}); ${f.evidence}`.slice(0, 200),
+  }));
+}
+
+function runChecks(nodes, rolesMap, clustersTable, topNodesTable, th) {
+  const errors = [];
+  const nodeGids = new Set(nodes.map(n => String(n.gid)));
+  const roleGids = new Set(rolesMap.keys());
+  const missing = [...nodeGids].filter(g => !roleGids.has(g));
+  if (missing.length) errors.push(`Узлы отсутствуют в результатах: ${missing.slice(0, 5).join(', ')}`);
+  const validRoles = new Set(ROLE_PRIORITY);
+  for (const f of rolesMap.values()) {
+    if (!validRoles.has(f.role)) errors.push(`Недопустимая роль у ${f.gid}: ${f.role}`);
+    if (f.roleScore < 0 || f.roleScore > 1) errors.push(`role_score вне [0,1] у ${f.gid}`);
+    if (f.priorityScore < 0 || f.priorityScore > 1) errors.push(`priority_score вне [0,1] у ${f.gid}`);
+    if (!f.evidence || f.evidence.length === 0) errors.push(`Пустой evidence у ${f.gid}`);
+    if (f.evidence && f.evidence.length > th.evidenceMaxLen) errors.push(`evidence длиннее ${th.evidenceMaxLen} у ${f.gid}`);
+    if (f.isMaxDepth && f.outDegree === 0 && f.inDegree <= 1 && f.role === 'terminal') {
+      errors.push(`${f.gid}: terminal на max_depth только из-за отсутствия исходящих — нарушение`);
+    }
+  }
+  if (nodeGids.size >= th.topNodesMinRows && topNodesTable.length < th.topNodesMinRows) {
+    errors.push(`top_nodes: ${topNodesTable.length} строк, ожидалось минимум ${th.topNodesMinRows}`);
+  }
+  return errors.slice(0, 30);
+}
+
+if (typeof module !== 'undefined') {
+  module.exports = {
+    THRESHOLDS, ROLE_PRIORITY, buildGraph, undirectedNeighbors, betweennessCentrality,
+    computeFeatures, assignRoles, computeClusters, computePriorityScores,
+    buildClustersTable, buildTopNodesTable, runChecks,
+  };
+}
+
+</script>
+<script>
+// ---------- App layer: UI, file loading, rendering. Uses functions from core.js ----------
+
+const state = { nodes: null, edges: null, transactions: null, roles: null, clustersTable: null, topNodes: null, errors: null, selectedGid: null };
+
+function $(id) { return document.getElementById(id); }
+function log(msg) { const el = $('log'); el.textContent += msg + '\n'; el.scrollTop = el.scrollHeight; }
+function setStatus(msg) { $('status').textContent = msg; }
+
+// ---- CSV parsing (simple, handles quoted fields with commas) ----
+function parseCSV(text) {
+  const rows = [];
+  let i = 0, field = '', row = [], inQuotes = false;
+  const pushField = () => { row.push(field); field = ''; };
+  const pushRow = () => { pushField(); rows.push(row); row = []; };
+  while (i < text.length) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') pushField();
+      else if (c === '\n') { if (field.length || row.length) pushRow(); }
+      else if (c === '\r') { /* skip */ }
+      else field += c;
+    }
+    i++;
+  }
+  if (field.length || row.length) pushRow();
+  if (!rows.length) return [];
+  const header = rows[0];
+  return rows.slice(1).filter(r => r.length === header.length && r.some(x => x !== '')).map(r => {
+    const o = {};
+    header.forEach((h, idx) => { o[h.trim()] = r[idx]; });
+    return o;
+  });
+}
+
+async function readFileAsRows(file) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.csv')) {
+    const text = await file.text();
+    return parseCSV(text);
+  }
+  // parquet
+  const buf = await file.arrayBuffer();
+  const { parquetReadObjects } = await import('https://cdn.jsdelivr.net/npm/hyparquet/src/hyparquet.min.js');
+  const rows = await parquetReadObjects({ file: buf });
+  return rows;
+}
+
+function coerceNodes(rows) {
+  return rows.map(r => ({ gid: String(r.gid ?? r.node_id ?? r.id), depth: Number(r.depth ?? r.level ?? 0), is_seed: (r.is_seed === true || r.is_seed === 'true' || r.is_seed === 1 || r.is_seed === '1') }));
+}
+function coerceEdges(rows) {
+  return rows.map(r => ({ src: String(r.src ?? r.source), dst: String(r.dst ?? r.target), sum_kzt: Number(r.sum_kzt ?? r.amount_kzt ?? 0), n_tx: Number(r.n_tx ?? r.tx_count ?? 1), depth: Number(r.depth ?? 0) }));
+}
+function coerceTx(rows) {
+  return rows.map(r => ({ src: String(r.src ?? r.source), dst: String(r.dst ?? r.target), date: r.date ?? r.tx_date, sum_kzt: Number(r.sum_kzt ?? r.amount_kzt ?? 0) }));
+}
+
+// ---- Synthetic data generator (client-side, clearly synthetic) ----
+function genSynthetic(nNodes, seed) {
+  let s = seed;
+  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const randint = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+  const choice = arr => arr[Math.floor(rnd() * arr.length)];
+  const sample = (arr, k) => { const c = [...arr]; const out = []; for (let i = 0; i < k && c.length; i++) { const idx = Math.floor(rnd() * c.length); out.push(c[idx]); c.splice(idx, 1); } return out; };
+
+  const gids = Array.from({ length: nNodes }, (_, i) => 'SYN' + String(i).padStart(5, '0'));
+  const nSeed = Math.max(3, Math.floor(nNodes / 40));
+  const seedGids = new Set(gids.slice(0, nSeed));
+  const depthOf = {};
+  for (const g of gids) depthOf[g] = seedGids.has(g) ? 0 : choice([1, 1, 1, 2, 2, 3, 4]);
+  const nodes = gids.map(g => ({ gid: g, depth: depthOf[g], is_seed: seedGids.has(g) }));
+  const nonSeed = gids.filter(g => !seedGids.has(g));
+  const edges = [];
+  for (const c of sample(nonSeed, Math.max(1, Math.floor(nNodes / 50))))
+    for (const s2 of sample(gids.filter(x => x !== c), Math.min(8, gids.length - 1))) edges.push({ src: s2, dst: c, sum_kzt: 50000 + rnd() * 850000, n_tx: randint(1, 4) });
+  for (const d of sample(nonSeed, Math.max(1, Math.floor(nNodes / 50))))
+    for (const r of sample(gids.filter(x => x !== d), Math.min(8, gids.length - 1))) edges.push({ src: d, dst: r, sum_kzt: 20000 + rnd() * 380000, n_tx: randint(1, 3) });
+  for (const a of sample(nonSeed, Math.max(1, Math.floor(nNodes / 60)))) {
+    const b = choice(nonSeed), c2 = choice(nonSeed);
+    if (new Set([a, b, c2]).size < 3) continue;
+    const amt = 100000 + rnd() * 400000;
+    edges.push({ src: a, dst: b, sum_kzt: amt, n_tx: 1 });
+    edges.push({ src: b, dst: c2, sum_kzt: amt * (0.85 + rnd() * 0.15), n_tx: 1 });
+  }
+  for (const t of gids.filter(g => depthOf[g] === 4)) {
+    const nIn = choice([1, 1, 2, 3]);
+    for (const s2 of sample(gids.filter(x => x !== t), Math.min(nIn, gids.length - 1))) edges.push({ src: s2, dst: t, sum_kzt: 30000 + rnd() * 270000, n_tx: randint(1, 2) });
+  }
+  for (let i = 0; i < nNodes * 2; i++) { const [a, b] = sample(gids, 2); edges.push({ src: a, dst: b, sum_kzt: 5000 + rnd() * 195000, n_tx: randint(1, 3) }); }
+  const transactions = [];
+  for (const e of edges) { const n = Math.max(1, Math.round(e.n_tx)); for (let k = 0; k < n; k++) transactions.push({ src: e.src, dst: e.dst, date: '2026-06-01', sum_kzt: e.sum_kzt / n }); }
+  return { nodes, edges, transactions };
+}
+
+// ---- Pipeline runner ----
+async function runPipeline() {
+  if (!state.nodes || !state.edges) { setStatus('Сначала загрузите nodes и edges (или синтетические данные).'); return; }
+  setStatus('Считаю граф и роли…');
+  await new Promise(r => setTimeout(r, 30)); // let UI paint
+  const t0 = performance.now();
+  const th = THRESHOLDS;
+  const { out, inn, allGids } = buildGraph(state.nodes, state.edges);
+  const adj = undirectedNeighbors(out, inn);
+  const feats = computeFeatures(state.nodes, out, inn, adj);
+  const roles = assignRoles(feats, th);
+  const clusterOf = computeClusters(out, inn, allGids);
+  computePriorityScores(roles, clusterOf, th);
+  const clustersTable = buildClustersTable(roles, state.edges);
+  const topNodes = buildTopNodesTable(roles, th.topNodesMinRows);
+  const errors = runChecks(state.nodes, roles, clustersTable, topNodes, th);
+  const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+
+  state.roles = roles; state.clustersTable = clustersTable; state.topNodes = topNodes; state.errors = errors;
+  state.out = out; state.edgesRaw = state.edges;
+
+  setStatus(`Готово за ${elapsed} с. Узлов: ${state.nodes.length}, рёбер: ${state.edges.length}, кластеров: ${clustersTable.length}.`);
+  renderAll();
+  $('results').classList.remove('hidden');
+}
+
+// ---- Rendering ----
+const ROLE_COLORS = { consolidator: '#e2725b', distributor: '#4c8dae', transit: '#d9a441', terminal: '#5c9e6f', coordinator: '#9b7fc7', peripheral: '#6b7280' };
+
+function renderAll() {
+  renderStats();
+  renderChecks();
+  renderRoleBars();
+  renderFilters();
+  renderTable();
+  renderTopNodes();
+  renderClusters();
+  renderGraph();
+}
+
+function renderStats() {
+  const s = state;
+  $('stat-nodes').textContent = s.nodes.length;
+  $('stat-edges').textContent = s.edges.length;
+  $('stat-tx').textContent = s.transactions ? s.transactions.length : '—';
+  $('stat-clusters').textContent = s.clustersTable.length;
+}
+
+function renderChecks() {
+  const el = $('checks');
+  if (!state.errors.length) { el.innerHTML = '<div class="text-emerald-400">✓ Все автоматические проверки пройдены</div>'; return; }
+  el.innerHTML = '<div class="text-rose-400 mb-1">Найдены нарушения проверок:</div>' + state.errors.map(e => `<div class="text-rose-300 text-sm">• ${escapeHtml(e)}</div>`).join('');
+}
+
+function renderRoleBars() {
+  const counts = {};
+  for (const f of state.roles.values()) counts[f.role] = (counts[f.role] || 0) + 1;
+  const max = Math.max(...Object.values(counts));
+  const order = ['coordinator', 'consolidator', 'distributor', 'transit', 'terminal', 'peripheral'];
+  $('role-bars').innerHTML = order.filter(r => counts[r]).map(r => `
+    <div class="flex items-center gap-2 text-sm mb-1">
+      <span class="w-24 shrink-0" style="color:${ROLE_COLORS[r]}">${r}</span>
+      <div class="flex-1 bg-slate-800 rounded h-3 overflow-hidden"><div style="width:${(counts[r] / max * 100).toFixed(0)}%;background:${ROLE_COLORS[r]}" class="h-3"></div></div>
+      <span class="w-10 text-right text-slate-400">${counts[r]}</span>
+    </div>`).join('');
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+function renderFilters() {
+  const roles = [...new Set([...state.roles.values()].map(f => f.role))].sort();
+  const clusters = [...new Set([...state.roles.values()].map(f => f.clusterId))].sort((a, b) => a - b);
+  $('filter-role').innerHTML = '<option value="">Все роли</option>' + roles.map(r => `<option value="${r}">${r}</option>`).join('');
+  $('filter-cluster').innerHTML = '<option value="">Все кластеры</option>' + clusters.map(c => `<option value="${c}">Кластер ${c}</option>`).join('');
+}
+
+function getFiltered() {
+  const roleF = $('filter-role').value, clusterF = $('filter-cluster').value, search = $('search-gid').value.trim().toLowerCase();
+  return [...state.roles.values()].filter(f =>
+    (!roleF || f.role === roleF) && (!clusterF || String(f.clusterId) === clusterF) && (!search || f.gid.toLowerCase().includes(search))
+  );
+}
+
+function renderTable() {
+  const rows = getFiltered().sort((a, b) => b.priorityScore - a.priorityScore).slice(0, 500);
+  $('table-count').textContent = `Показано ${rows.length} из ${state.roles.size} (после фильтров)`;
+  $('table-body').innerHTML = rows.map(f => `
+    <tr class="border-b border-slate-800 hover:bg-slate-800/50 cursor-pointer" onclick="selectNode('${f.gid}')">
+      <td class="py-1 px-2 font-mono text-xs">${escapeHtml(f.gid)}</td>
+      <td class="py-1 px-2"><span style="color:${ROLE_COLORS[f.role]}">${f.role}</span></td>
+      <td class="py-1 px-2 text-right">${f.roleScore.toFixed(2)}</td>
+      <td class="py-1 px-2 text-right">${f.clusterId}</td>
+      <td class="py-1 px-2 text-right">${f.priorityScore.toFixed(2)}</td>
+      <td class="py-1 px-2 text-slate-400 text-xs">${escapeHtml(f.evidence)}</td>
+    </tr>`).join('');
+}
+
+function renderTopNodes() {
+  $('top-body').innerHTML = state.topNodes.map(t => `
+    <tr class="border-b border-slate-800 hover:bg-slate-800/50 cursor-pointer" onclick="selectNode('${t.gid}')">
+      <td class="py-1 px-2 text-right">${t.rank}</td>
+      <td class="py-1 px-2 font-mono text-xs">${escapeHtml(t.gid)}</td>
+      <td class="py-1 px-2"><span style="color:${ROLE_COLORS[t.role]}">${t.role}</span></td>
+      <td class="py-1 px-2 text-right">${t.priority_score.toFixed(2)}</td>
+      <td class="py-1 px-2 text-slate-400 text-xs">${escapeHtml(t.why)}</td>
+    </tr>`).join('');
+}
+
+function renderClusters() {
+  $('clusters-body').innerHTML = state.clustersTable.map(c => `
+    <tr class="border-b border-slate-800">
+      <td class="py-1 px-2 text-right">${c.cluster_id}</td>
+      <td class="py-1 px-2 text-right">${c.n_nodes}</td>
+      <td class="py-1 px-2 text-right">${c.n_seed}</td>
+      <td class="py-1 px-2 text-right">${Math.round(c.sum_kzt_internal).toLocaleString('ru-RU')}</td>
+      <td class="py-1 px-2 font-mono text-xs">${escapeHtml(c.top_gids)}</td>
+      <td class="py-1 px-2 text-slate-400 text-xs">${escapeHtml(c.hypothesis)}</td>
+    </tr>`).join('');
+}
+
+function selectNode(gid) {
+  state.selectedGid = gid;
+  $('search-gid').value = gid;
+  const f = state.roles.get(gid);
+  if (!f) return;
+  $('node-card').classList.remove('hidden');
+  $('node-card').innerHTML = `
+    <div class="text-sm font-semibold mb-1">Узел ${escapeHtml(gid)}</div>
+    <div class="grid grid-cols-2 gap-1 text-xs text-slate-300">
+      <div>Роль: <span style="color:${ROLE_COLORS[f.role]}">${f.role}</span></div>
+      <div>Кластер: ${f.clusterId}</div>
+      <div>role_score: ${f.roleScore.toFixed(2)}</div>
+      <div>priority_score: ${f.priorityScore.toFixed(2)}</div>
+      <div>Вход: ${f.inDegree} отпр. / ${Math.round(f.inSum).toLocaleString('ru-RU')} тг</div>
+      <div>Выход: ${f.outDegree} получ. / ${Math.round(f.outSum).toLocaleString('ru-RU')} тг</div>
+    </div>
+    <div class="text-xs text-slate-400 mt-1">${escapeHtml(f.evidence)}</div>`;
+  renderGraph();
+  renderTable();
+}
+
+// ---- Graph (D3 force layout on canvas) ----
+let simulation = null;
+function renderGraph() {
+  const canvas = $('graph-canvas');
+  const ctx = canvas.getContext('2d');
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  canvas.width = width * devicePixelRatio; canvas.height = height * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+
+  let nodeIds;
+  if (state.selectedGid && state.roles.has(state.selectedGid)) {
+    const g = state.selectedGid;
+    const neigh = new Set();
+    for (const e of state.edgesRaw) { if (e.src === g) neigh.add(e.dst); if (e.dst === g) neigh.add(e.src); }
+    nodeIds = new Set([g, ...neigh]);
+    $('graph-caption').textContent = `Эго-граф узла ${g} и ${neigh.size} соседей`;
+  } else {
+    const filtered = getFiltered();
+    if (filtered.length > 300) {
+      nodeIds = new Set(filtered.sort((a, b) => b.priorityScore - a.priorityScore).slice(0, 300).map(f => f.gid));
+      $('graph-caption').textContent = `После фильтров ${filtered.length} узлов — показаны 300 с наибольшим priority_score. Используйте поиск по gid для эго-графа.`;
+    } else {
+      nodeIds = new Set(filtered.map(f => f.gid));
+      $('graph-caption').textContent = `Показано ${nodeIds.size} узлов`;
+    }
+  }
+
+  const nodesArr = [...nodeIds].map(id => ({ id, role: state.roles.get(id)?.role || 'peripheral' }));
+  const linksArr = state.edgesRaw.filter(e => nodeIds.has(e.src) && nodeIds.has(e.dst)).map(e => ({ source: e.src, target: e.dst }));
+
+  if (simulation) simulation.stop();
+  simulation = d3.forceSimulation(nodesArr)
+    .force('link', d3.forceLink(linksArr).id(d => d.id).distance(40).strength(0.3))
+    .force('charge', d3.forceManyBody().strength(-60))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collide', d3.forceCollide(8))
+    .stop();
+  for (let i = 0; i < 150; i++) simulation.tick();
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.strokeStyle = 'rgba(148,163,184,0.25)'; ctx.lineWidth = 0.6;
+  for (const l of linksArr) { ctx.beginPath(); ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.target.x, l.target.y); ctx.stroke(); }
+  for (const n of nodesArr) {
+    ctx.beginPath();
+    const r = n.id === state.selectedGid ? 7 : 4;
+    ctx.arc(n.x, n.y, r, 0, 2 * Math.PI);
+    ctx.fillStyle = ROLE_COLORS[n.role] || '#6b7280';
+    ctx.fill();
+    if (n.id === state.selectedGid) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+  }
+  canvas._nodesArr = nodesArr;
+}
+
+function initCanvasClick() {
+  const canvas = $('graph-canvas');
+  canvas.addEventListener('click', ev => {
+    const rect = canvas.getBoundingClientRect();
+    const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+    const arr = canvas._nodesArr || [];
+    let best = null, bestD = 12;
+    for (const n of arr) { const d = Math.hypot(n.x - x, n.y - y); if (d < bestD) { bestD = d; best = n; } }
+    if (best) selectNode(best.id);
+  });
+}
+
+// ---- CSV export ----
+function toCSV(rows, columns) {
+  const esc = v => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  return columns.join(',') + '\n' + rows.map(r => columns.map(c => esc(r[c])).join(',')).join('\n');
+}
+function downloadCSV(filename, rows, columns) {
+  const csv = toCSV(rows, columns);
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportNodesRoles() {
+  const rows = [...state.roles.values()].map(f => ({ gid: f.gid, role: f.role, role_score: f.roleScore, cluster_id: f.clusterId, priority_score: f.priorityScore, evidence: f.evidence }));
+  downloadCSV('nodes_roles.csv', rows, ['gid', 'role', 'role_score', 'cluster_id', 'priority_score', 'evidence']);
+}
+function exportClusters() { downloadCSV('clusters.csv', state.clustersTable, ['cluster_id', 'n_nodes', 'n_seed', 'sum_kzt_internal', 'top_gids', 'hypothesis']); }
+function exportTopNodes() { downloadCSV('top_nodes.csv', state.topNodes, ['rank', 'gid', 'role', 'priority_score', 'why']); }
+
+// ---- Wiring ----
+function wireUI() {
+  $('btn-load-synthetic').addEventListener('click', () => {
+    const n = parseInt($('synthetic-n').value) || 250;
+    const data = genSynthetic(n, 42);
+    state.nodes = data.nodes; state.edges = data.edges; state.transactions = data.transactions;
+    setStatus(`Синтетические данные (НЕ данные хакатона) сгенерированы: ${n} узлов, ${data.edges.length} рёбер.`);
+  });
+  $('btn-run').addEventListener('click', runPipeline);
+  $('file-nodes').addEventListener('change', async e => { if (e.target.files[0]) { state.nodes = coerceNodes(await readFileAsRows(e.target.files[0])); setStatus(`nodes: ${state.nodes.length} строк загружено`); } });
+  $('file-edges').addEventListener('change', async e => { if (e.target.files[0]) { state.edges = coerceEdges(await readFileAsRows(e.target.files[0])); setStatus(`edges: ${state.edges.length} строк загружено`); } });
+  $('file-tx').addEventListener('change', async e => { if (e.target.files[0]) { state.transactions = coerceTx(await readFileAsRows(e.target.files[0])); setStatus(`transactions: ${state.transactions.length} строк загружено`); } });
+  $('filter-role').addEventListener('change', () => { renderTable(); renderGraph(); });
+  $('filter-cluster').addEventListener('change', () => { renderTable(); renderGraph(); });
+  $('search-gid').addEventListener('input', () => {
+    const g = $('search-gid').value.trim();
+    state.selectedGid = state.roles && state.roles.has(g) ? g : null;
+    if (state.selectedGid) selectNode(state.selectedGid); else { renderTable(); renderGraph(); }
+  });
+  $('btn-export-nodes').addEventListener('click', exportNodesRoles);
+  $('btn-export-clusters').addEventListener('click', exportClusters);
+  $('btn-export-top').addEventListener('click', exportTopNodes);
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
+  initCanvasClick();
+  window.addEventListener('resize', () => { if (state.roles) renderGraph(); });
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('bg-slate-700'));
+  $('tab-' + tab).classList.remove('hidden');
+  document.querySelector(`.tab-btn[data-tab="${tab}"]`).classList.add('bg-slate-700');
+  if (tab === 'graph') renderGraph();
+}
+
+document.addEventListener('DOMContentLoaded', wireUI);
+
+</script>
+</body>
+</html>
